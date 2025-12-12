@@ -1,7 +1,46 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-async function searchWeb(query, limit = 15) {
+async function searchGoogle(query, limit = 15) {
+  try {
+    const encoded = encodeURIComponent(query);
+    const response = await axios.get(`https://www.google.com/search?q=${encoded}`, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+    const $ = cheerio.load(response.data);
+    const results = [];
+    
+    // Google's main result container
+    $('div[data-sokoban-container]').each((i, el) => {
+      if (results.length >= limit) return;
+      const link = $(el).find('a[data-gk5asan-mvm]');
+      const titleEl = $(el).find('h3');
+      const title = titleEl.text().trim();
+      const url = link.attr('href');
+      const snippetEl = $(el).find('[data-mh="0"]');
+      const snippet = snippetEl.text().trim();
+      
+      if (title && url && !url.includes('webcache') && snippet) {
+        results.push({ title, url, snippet: snippet || 'No description' });
+      }
+    });
+    
+    // Fallback: if Google selectors don't work, try alternative structure
+    if (results.length === 0) {
+      return await searchBingFallback(query, limit);
+    }
+    
+    return results.slice(0, limit);
+  } catch (error) {
+    console.error('Google search failed:', error.message);
+    return await searchBingFallback(query, limit);
+  }
+}
+
+async function searchBingFallback(query, limit = 15) {
   try {
     const encoded = encodeURIComponent(query);
     const response = await axios.get(`https://www.bing.com/search?q=${encoded}`, {
@@ -17,13 +56,13 @@ async function searchWeb(query, limit = 15) {
       const title = $(el).find('h2 a').text().trim();
       const url = $(el).find('h2 a').attr('href');
       const snippet = $(el).find('.b_caption p').text().trim();
-      if (title && url && url.includes('bing.com')) {
+      if (title && url && snippet) {
         results.push({ title, url, snippet: snippet || 'No description' });
       }
     });
     return results.slice(0, limit);
   } catch (error) {
-    console.error('Bing failed:', error.message);
+    console.error('Bing fallback failed:', error.message);
     return [];
   }
 }
@@ -45,7 +84,7 @@ module.exports = async (req, res) => {
   }
   
   try {
-    const results = await searchWeb(query.trim(), Math.min(parseInt(limit) || 10, 15));
+    const results = await searchGoogle(query.trim(), Math.min(parseInt(limit) || 10, 15));
     return res.json({ success: true, query: query.trim(), results });
   } catch (error) {
     console.error('API error:', error);
