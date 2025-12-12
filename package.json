@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "description": "Free web search API for Bubble AI",
   "main": "index.js",
-  "type": "module",
-  "scripts": {
+  "type": "commonjs",  "scripts": {
     "start": "node index.js",
     "dev": "node index.js"
   },
