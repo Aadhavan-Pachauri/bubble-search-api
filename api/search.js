@@ -1,16 +1,65 @@
-// Brave Search - Free, 2000 queries/month
-// Sign up: https://api.search.brave.com/
-// Much better than DuckDuckGo HTML endpoint
+const axios = require('axios');
+const cheerio = require('cheerio');
 
-const https = require('https');
+// Cache for search results (1 hour TTL)
+const resultCache = new Map();
+const CACHE_TTL = 3600000;
 
-module.exports = (req, res) => {
+// Real DuckDuckGo scraper
+async function scrapeDuckDuckGo(query, limit = 15) {
+  try {
+    const encodedQuery = encodeURIComponent(query);
+    const url = `https://html.duckduckgo.com/?q=${encodedQuery}`;
+
+    const { data } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+      },
+      timeout: 10000
+    });
+
+    const $ = cheerio.load(data);
+    const results = [];
+
+    // Extract results from DuckDuckGo HTML structure
+    $('[data-testid="result"]').each((index, element) => {
+      if (results.length >= limit) return;
+      
+      const titleElem = $(element).find('[data-testid="result-title-a"]');
+      const snippetElem = $(element).find('[data-testid="result-snippet"]');
+      
+      const title = titleElem.text().trim();
+      const url = titleElem.attr('href');
+      const snippet = snippetElem.text().trim();
+
+      if (title && url && snippet) {
+        results.push({
+          title: title.substring(0, 150),
+          url: url,
+          snippet: snippet.substring(0, 250)
+        });
+      }
+    });
+
+    return results;
+  } catch (error) {
+    console.error('DuckDuckGo scraper error:', error.message);
+    return [];
+  }
+}
+
+module.exports = async (req, res) => {
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
 
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  // Handle OPTIONS requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
   const { query, limit = 15 } = req.query;
 
@@ -22,86 +71,49 @@ module.exports = (req, res) => {
     });
   }
 
-  // Get API key from environment
-  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  try {
+    const cacheKey = `${query}:${limit}`;
+    
+    // Check cache
+    if (resultCache.has(cacheKey)) {
+      const cached = resultCache.get(cacheKey);
+      if (Date.now() - cached.timestamp < CACHE_TTL) {
+        return res.status(200).json({
+          success: true,
+          query,
+          results: cached.results,
+          count: cached.results.length,
+          cached: true,
+          timestamp: new Date().toISOString()
+        });
+      }
+      resultCache.delete(cacheKey);
+    }
 
-  // If no API key, provide setup instructions
-  if (!apiKey) {
+    // Scrape real results
+    const results = await scrapeDuckDuckGo(query, parseInt(limit) || 15);
+    
+    // Cache results
+    resultCache.set(cacheKey, {
+      results,
+      timestamp: Date.now()
+    });
+
     return res.status(200).json({
-      success: false,
+      success: true,
       query,
-      results: [],
-      message: 'Setup required',
-      setupInstructions: {
-        step1: 'Sign up for free at https://api.search.brave.com/',
-        step2: 'Copy your API key from dashboard',
-        step3: 'Add to Vercel env: BRAVE_SEARCH_API_KEY=your_key',
-        step4: 'Redeploy and search will work with real results!',
-        freeQuota: '2000 queries per month - unlimited for development'
-      },
+      results,
+      count: results.length,
+      cached: false,
       timestamp: new Date().toISOString()
     });
-  }
-
-  const count = Math.min(parseInt(limit) || 15, 20);
-  const path = `/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
-
-  const options = {
-    hostname: 'api.search.brave.com',
-    path,
-    method: 'GET',
-    headers: {
-      'Accept': 'application/json',
-      'X-Subscription-Token': apiKey
-    },
-    timeout: 8000
-  };
-
-  const req_api = https.request(options, (response) => {
-    let data = '';
-    response.on('data', chunk => { data += chunk; });
-    response.on('end', () => {
-      try {
-        const result = JSON.parse(data);
-        
-        if (response.statusCode === 200 && result.web) {
-          const results = result.web.slice(0, count).map(r => ({
-            title: r.title,
-            url: r.url,
-            snippet: r.description || ''
-          }));
-          
-          return res.status(200).json({
-            success: true,
-            query,
-            results,
-            count: results.length,
-            source: 'brave_search',
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (e) {
-        // Handle parse error
-      }
-      
-      return res.status(200).json({
-        success: false,
-        query,
-        results: [],
-        error: 'API error or invalid key',
-        timestamp: new Date().toISOString()
-      });
+  } catch (error) {
+    console.error('Search API error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error',
+      results: [],
+      query
     });
-  });
-
-  req_api.on('timeout', () => {
-    req_api.abort();
-    res.status(500).json({ success: false, error: 'Request timeout' });
-  });
-
-  req_api.on('error', (e) => {
-    res.status(500).json({ success: false, error: e.message });
-  });
-
-  req_api.end();
+  }
 };
