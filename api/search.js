@@ -1,10 +1,10 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-async function searchBing(query, limit = 15) {
+async function searchDuckDuckGo(query, limit = 15) {
   try {
     const encoded = encodeURIComponent(query);
-    const response = await axios.get(`https://www.bing.com/search?q=${encoded}`, {
+    const response = await axios.get(`https://duckduckgo.com/html?q=${encoded}`, {
       timeout: 10000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -13,11 +13,14 @@ async function searchBing(query, limit = 15) {
     const $ = cheerio.load(response.data);
     const results = [];
     
-    $('li.b_algo').each((i, el) => {
+    // DuckDuckGo uses .results class for result containers
+    $('div.result').each((i, el) => {
       if (results.length >= limit) return;
-      const title = $(el).find('h2 a').text().trim();
-      const url = $(el).find('h2 a').attr('href');
-      const snippet = $(el).find('.b_caption p').text().trim();
+      const titleEl = $(el).find('.result__title a');
+      const title = titleEl.text().trim();
+      const url = titleEl.attr('href');
+      const snippetEl = $(el).find('.result__snippet');
+      const snippet = snippetEl.text().trim();
       
       if (title && url && snippet) {
         results.push({ title, url, snippet });
@@ -26,7 +29,7 @@ async function searchBing(query, limit = 15) {
     
     return results.slice(0, limit);
   } catch (error) {
-    console.error('Bing search failed:', error.message);
+    console.error('DuckDuckGo search failed:', error.message);
     return [];
   }
 }
@@ -48,7 +51,7 @@ module.exports = async (req, res) => {
   }
   
   try {
-    const results = await searchBing(query.trim(), Math.min(parseInt(limit) || 10, 15));
+    const results = await searchDuckDuckGo(query.trim(), Math.min(parseInt(limit) || 10, 15));
     return res.json({ success: true, query: query.trim(), results });
   } catch (error) {
     console.error('API error:', error);
