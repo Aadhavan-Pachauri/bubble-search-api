@@ -318,33 +318,3 @@ module.exports = async (req, res) => {
     });
   }
 };
-
-  const query = req.query.query || req.body?.query;
-  const limit = parseInt(req.query.limit || req.body?.limit || req.body?.limit || 15);
-
-  if (!query) {
-    return res.status(400).json({
-      success: false,
-      error: 'Query parameter required',
-      results: [],
-    });
-  }
-
-  try {
-    const results = await search(query, limit);
-    return res.status(200).json({
-      success: true,
-      query,
-      results,
-      count: results.length,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error('[ERROR]', error.message);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Search failed',
-      results: [],
-    });
-  }
-};
