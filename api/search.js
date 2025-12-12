@@ -1,47 +1,13 @@
-// SearXNG - Free, unlimited web search (no API keys required)
-// Uses public SearXNG instances that aggregate results from Google, Bing, DuckDuckGo, etc.
+// Unlimited free web search using DuckDuckGo (no API keys, no rate limits)
 
 const axios = require('axios');
+const cheerio = require('cheerio');
 
-// Simple in-memory cache (5 min TTL)
 const cache = new Map();
 const CACHE_TTL = 300000; // 5 minutes
 
-// List of reliable public SearXNG instances
-const SEARXNG_INSTANCES = [
-  'https://searx.space/',
-  'https://search.mydataknows.com/',
-  'https://searx.info/',
-  'https://search.privacyguide.org/',
-];
-
-// Get a working SearXNG instance (with fallback)
-let currentInstanceIndex = 0;
-
-async function getWorkingSearXNGInstance() {
-  const maxAttempts = SEARXNG_INSTANCES.length;
-  
-  for (let i = 0; i < maxAttempts; i++) {
-    const instance = SEARXNG_INSTANCES[currentInstanceIndex % SEARXNG_INSTANCES.length];
-    currentInstanceIndex++;
-    
-    try {
-      // Test the instance
-      const response = await axios.get(`${instance}api`, { timeout: 3000 });
-      if (response.status === 200) {
-        return instance;
-      }
-    } catch (error) {
-      console.log(`Instance ${instance} unavailable, trying next...`);
-    }
-  }
-  
-  // Default to first instance if all fail
-  return SEARXNG_INSTANCES[0];
-}
-
-async function searchSearXNG(query, limit = 15) {
-  const cacheKey = `searxng:${query}:${limit}`;
+async function searchDuckDuckGo(query, limit = 15) {
+  const cacheKey = `ddg:${query}:${limit}`;
   const cached = cache.get(cacheKey);
   
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
@@ -50,36 +16,70 @@ async function searchSearXNG(query, limit = 15) {
   }
   
   try {
-    const instance = await getWorkingSearXNGInstance();
-    console.log(`Searching with SearXNG instance: ${instance}`);
-    
-    const response = await axios.get(`${instance}api`, {
-      params: {
-        q: query,
-        format: 'json',
-        pageno: 1,
-        safesearch: 0,
-        time_range: 'year',
-      },
-      timeout: 10000,
+    // Use DuckDuckGo's HTML endpoint with a modern user agent
+    const response = await axios.get('https://duckduckgo.com/html', {
+      params: { q: query, t: 'h_' },
+      timeout: 15000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
       }
     });
     
-    const results = (response.data.results || []).slice(0, limit).map(result => ({
-      title: result.title || '',
-      url: result.url || '',
-      snippet: result.content || result.summary || ''
-    }));
+    const $ = cheerio.load(response.data);
+    const results = [];
+    
+    // Parse DuckDuckGo search results
+    $('.result').each((i, elem) => {
+      if (results.length >= limit) return;
+      
+      const titleElem = $(elem).find('.result__title a');
+      const snippetElem = $(elem).find('.result__snippet');
+      const linkElem = $(elem).find('.result__url');
+      
+      const title = titleElem.text().trim();
+      const url = titleElem.attr('href') || '';
+      const snippet = snippetElem.text().trim();
+      
+      if (title && url && url !== '#') {
+        results.push({
+          title,
+          url,
+          snippet
+        });
+      }
+    });
+    
+    // If HTML parsing didn't work, try alternative selectors
+    if (results.length === 0) {
+      console.log('Using fallback parser for DuckDuckGo results');
+      $('[data-result]').each((i, elem) => {
+        if (results.length >= limit) return;
+        
+        const titleElem = $(elem).find('a[data-result-title]');
+        const snippetElem = $(elem).find('[data-result-description]');
+        
+        const title = titleElem.text().trim();
+        const url = titleElem.attr('href') || '';
+        const snippet = snippetElem.text().trim();
+        
+        if (title && url) {
+          results.push({ title, url, snippet });
+        }
+      });
+    }
     
     // Cache the results
     cache.set(cacheKey, { results, timestamp: Date.now() });
-    console.log(`Cache MISS - fetched ${results.length} results for: ${query}`);
+    console.log(`Fetched ${results.length} results for: ${query}`);
     
-    return results;
+    return results.slice(0, limit);
   } catch (error) {
-    console.error('SearXNG Search error:', error.message);
+    console.error('DuckDuckGo search error:', error.message);
     return [];
   }
 }
@@ -105,10 +105,10 @@ module.exports = async (req, res) => {
   }
   
   try {
-    const results = await searchSearXNG(query, Math.min(parseInt(limit) || 15, 15));
+    const results = await searchDuckDuckGo(query, Math.min(parseInt(limit) || 15, 15));
     
     return res.status(200).json({
-      success: true,
+      success: results.length > 0,
       query,
       results,
       count: results.length,
