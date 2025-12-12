@@ -16,30 +16,40 @@ function enhanceQuery(query) {
   return query;
 }
 
-// Filter out irrelevant results based on query context
-function isRelevantResult(title, snippet, query) {
+// Filter out only the MOST obviously irrelevant results
+function shouldExcludeResult(title, snippet, query) {
   const lowerTitle = title.toLowerCase();
   const lowerSnippet = snippet.toLowerCase();
   const combined = (lowerTitle + ' ' + lowerSnippet).toLowerCase();
   const lowerQuery = query.toLowerCase();
   
-  // Keywords that indicate irrelevant results
-  const irrelevantKeywords = ['currency', 'korean won', 'krw', 'exchange rate', 'convert', 'definition', 'meaning', 'buddhism', 'past tense', 'webster'];
+  // Only exclude if it's CLEARLY about the wrong "won" - currency/definition/religion
+  const strongIndicators = {
+    currency: ['korean won', 'krw', 'exchange rate', 'convert.*won', 'won to dollar'],
+    definition: ['definition.*won', 'meaning.*won', 'webster', 'merriam', 'past tense of win'],
+    religion: ['won buddhism', 'buddhist']
+  };
   
-  // Check if result contains F1/Formula 1 context
-  const hasF1Context = combined.includes('f1') || combined.includes('formula') || combined.includes('grand prix') || combined.includes('race') || combined.includes('driver') || combined.includes('motorsport');
-  
-  // If query explicitly mentions F1/Formula, filter out non-F1 results
-  if ((lowerQuery.includes('f1') || lowerQuery.includes('formula')) && !hasF1Context) {
-    // Check if it's an irrelevant definition
-    for (const keyword of irrelevantKeywords) {
-      if (combined.includes(keyword)) {
-        return false;
+  // Check for strong indicators of wrong context
+  for (const [category, patterns] of Object.entries(strongIndicators)) {
+    for (const pattern of patterns) {
+      const regex = new RegExp(pattern, 'i');
+      if (regex.test(combined)) {
+        return true; // Exclude this result
       }
     }
   }
   
-  return true;
+  // For F1 queries, give preference to results mentioning racing/sports
+  if ((lowerQuery.includes('f1') || lowerQuery.includes('formula')) &&
+      (combined.includes('sport') || combined.includes('race') || combined.includes('grand prix') || 
+       combined.includes('driver') || combined.includes('motorsport') || combined.includes('lewis') ||
+       combined.includes('verstappen') || combined.includes('alonso') || combined.includes('hamilton'))) {
+    return false; // Keep this - it's likely about F1
+  }
+  
+  // Don't exclude generic news about winners/races
+  return false;
 }
 
 async function searchBing(query, limit = 15) {
@@ -54,23 +64,32 @@ async function searchBing(query, limit = 15) {
     });
     const $ = cheerio.load(response.data);
     const results = [];
+    const allResults = []; // Track all results for scoring
     
     $('li.b_algo').each((i, el) => {
-      if (results.length >= limit * 2) return; // Get more initial results to filter
+      if (allResults.length >= limit * 3) return; // Get more initial results
       const title = $(el).find('h2 a').text().trim();
       const url = $(el).find('h2 a').attr('href');
       const snippet = $(el).find('.b_caption p').text().trim();
       
       if (title && url && snippet) {
-        // Apply relevance filter
-        if (isRelevantResult(title, snippet, query)) {
-          results.push({ title, url, snippet });
-        }
+        allResults.push({ title, url, snippet, index: i });
+      }
+    });
+    
+    // Sort: first exclude obviously wrong results, then prefer query-relevant ones
+    allResults.forEach(result => {
+      if (!shouldExcludeResult(result.title, result.snippet, query)) {
+        results.push(result);
       }
     });
     
     // Return top results after filtering
-    return results.slice(0, limit);
+    return results.slice(0, limit).map(r => ({
+      title: r.title,
+      url: r.url,
+      snippet: r.snippet
+    }));
   } catch (error) {
     console.error('Bing search failed:', error.message);
     return [];
