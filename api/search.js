@@ -20,16 +20,6 @@ async function searchBing(query, limit = 15) {
       const snippet = $(el).find('.b_caption p').text().trim();
       
       if (title && url && snippet) {
-        // Filter out obviously irrelevant results for F1 queries
-        if (query.toLowerCase().includes('f1') || query.toLowerCase().includes('formula')) {
-          const combined = (title + ' ' + snippet).toLowerCase();
-          // Skip results that are clearly about currency/definition, not F1
-          if (combined.includes('korean won') || combined.includes('exchange rate') || 
-              (combined.includes('definition') && combined.includes('won')) ||
-              (combined.includes('meaning') && combined.includes('won'))) {
-            return; // Skip this result
-          }
-        }
         results.push({ title, url, snippet });
       }
     });
