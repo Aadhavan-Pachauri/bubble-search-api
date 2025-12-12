@@ -130,6 +130,82 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Bubble Search</title>
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #fff; }
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; margin-top: 100px; margin-bottom: 50px; }
+        .logo { font-size: 90px; font-weight: 300; color: #4285f4; margin-bottom: 30px; letter-spacing: -3px; }
+        .search-box { display: flex; max-width: 600px; margin: 30px auto; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-radius: 24px; padding: 10px 20px; }
+        input { flex: 1; border: none; outline: none; font-size: 16px; padding: 10px; }
+        button { background: #4285f4; color: white; border: none; padding: 10px 30px; border-radius: 4px; cursor: pointer; font-size: 14px; margin-left: 10px; }
+        button:hover { background: #357ae8; }
+        #results { margin-top: 40px; }
+        .result { margin-bottom: 30px; }
+        .result-title { color: #1a0dff; font-size: 18px; text-decoration: none; cursor: pointer; }
+        .result-title:hover { text-decoration: underline; }
+        .result-url { color: #006621; font-size: 14px; }
+        .result-snippet { color: #545454; font-size: 14px; margin-top: 5px; line-height: 1.6; }
+        .loading { text-align: center; color: #999; font-size: 14px; }
+        .error { color: #d32f2f; padding: 10px; background: #ffebee; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <div class="logo">🔍</div>
+          <h1>Bubble Search</h1>
+        </div>
+        <div class="search-box">
+          <input type="text" id="query" placeholder="Search the web..." onkeypress="if(event.key==='Enter')search()">
+          <button onclick="search()">Search</button>
+        </div>
+        <div id="results"></div>
+      </div>
+      <script>
+        async function search() {
+          const query = document.getElementById('query').value.trim();
+          if (!query) return;
+          
+          const resultsDiv = document.getElementById('results');
+          resultsDiv.innerHTML = '<div class="loading">Searching...</div>';
+          
+          try {
+            const response = await fetch('/api/search', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query, limit: 15 })
+            });
+            
+            const data = await response.json();
+            
+            if (data.results && data.results.length > 0) {
+              resultsDiv.innerHTML = data.results.map(r => `
+                <div class="result">
+                  <a href="${r.url}" target="_blank" class="result-title">${r.title}</a>
+                  <div class="result-url">${new URL(r.url).hostname}</div>
+                  <div class="result-snippet">${r.snippet}</div>
+                </div>
+              `).join('');
+            } else {
+              resultsDiv.innerHTML = '<div class="error">No results found</div>';
+            }
+          } catch (error) {
+            resultsDiv.innerHTML = '<div class="error">Error: ' + error.message + '</div>';
+          }
+        }
+      </script>
+    </body>
+    </html>
+  `);
+});
+
 app.listen(PORT, () => {
   console.log(`Bubble Search API running on port ${PORT}`);
 });
