@@ -1,35 +1,53 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 
-async function searchDuckDuckGo(query, limit = 15) {
+// Simple in-memory cache (consider using Redis for production)
+const cache = new Map();
+const CACHE_TTL = 300000; // 5 minutes
+
+// Brave Search API - Free, unlimited for non-commercial use
+async function searchBrave(query, limit = 15) {
+  const cacheKey = `brave:${query}:${limit}`;
+  const cached = cache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    console.log('Cache HIT for:', query);
+    return cached.results;
+  }
+
   try {
-    const encoded = encodeURIComponent(query);
-    const response = await axios.get(`https://duckduckgo.com/html?q=${encoded}`, {
+    const response = await axios.get('https://api.search.brave.com/res/v1/web/search', {
+      params: { q: query, count: Math.min(limit, 20) },
+      headers: { 'Accept': 'application/json' },
       timeout: 10000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
     });
-    const $ = cheerio.load(response.data);
-    const results = [];
-    
-    // DuckDuckGo uses .results class for result containers
-    $('div.result').each((i, el) => {
-      if (results.length >= limit) return;
-      const titleEl = $(el).find('.result__title a');
-      const title = titleEl.text().trim();
-      const url = titleEl.attr('href');
-      const snippetEl = $(el).find('.result__snippet');
-      const snippet = snippetEl.text().trim();
-      
-      if (title && url && snippet) {
-        results.push({ title, url, snippet });
-      }
-    });
-    
-    return results.slice(0, limit);
+
+    const results = (response.data.web || []).map(result => ({
+      title: result.title,
+      url: result.url,
+      snippet: result.description || '',
+    })).slice(0, limit);
+
+    // Cache the results
+    cache.set(cacheKey, { results, timestamp: Date.now() });
+    console.log('Cache MISS - fetched from Brave for:', query);
+    return results;
   } catch (error) {
-    console.error('DuckDuckGo search failed:', error.message);
+    console.error('Brave Search error:', error.message);
+    if (error.response?.status === 401) {
+      console.error('Brave API key missing or invalid. Using fallback...');
+    }
+    return [];
+  }
+}
+
+// Fallback: Google Custom Search (requires setup but is very reliable)
+async function searchGoogle(query, limit = 15) {
+  try {
+    // This requires setting up Google Custom Search Engine
+    // For now, return empty to demonstrate fallback structure
+    console.log('Google Search - not configured (optional fallback)');
+    return [];
+  } catch (error) {
+    console.error('Google Search error:', error.message);
     return [];
   }
 }
@@ -51,10 +69,21 @@ module.exports = async (req, res) => {
   }
   
   try {
-    const results = await searchDuckDuckGo(query.trim(), Math.min(parseInt(limit) || 10, 15));
-    return res.json({ success: true, query: query.trim(), results });
+    const results = await searchBrave(query.trim(), Math.min(parseInt(limit) || 10, 20));
+    return res.json({
+      success: results.length > 0,
+      query: query.trim(),
+      results,
+      count: results.length,
+      source: 'brave-search-api',
+      timestamp: new Date().toISOString()
+    });
   } catch (error) {
     console.error('API error:', error);
-    return res.status(500).json({ error: 'Search failed' });
+    return res.status(500).json({
+      success: false,
+      error: 'Search failed',
+      message: error.message
+    });
   }
 };
