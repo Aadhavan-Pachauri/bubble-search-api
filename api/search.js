@@ -1,208 +1,151 @@
-// COMPLETE WEB SEARCH ENGINE WITH SEMANTIC WEB CRAWLER
-// Fetches live web pages, indexes them, searches with TF-IDF
-// Generates relevant seed URLs based on query topics
+// ============================================
+// BUBBLE SEARCH API - PHASE 1 + PHASE 2
+// ============================================
+// Per-query semantic web crawling + persistent caching
+// Features: Real-time indexing, query caching, background crawling ready
 
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// ============ GLOBAL CACHE & CRAWL STATE ============
-const crawlCache = {}; // URL -> {title, content, timestamp}
-const visitedUrls = new Set();
-const MAX_CRAWL_TIME = 8000; // 8 second timeout for serverless
-const MAX_PAGES = 15; // Crawl max 15 pages per search query
+// ============ CONFIG ============
+const MAX_CRAWL_TIME = 7000; // 7s timeout for Vercel
+const MAX_PAGES = 12; // Crawl up to 12 pages per query
+const QUERY_CACHE_TTL = 5 * 60 * 1000; // Cache results for 5 minutes
+const CRAWL_DEPTH_LIMIT = 2; // Max link depth to follow
 
-// ============ SEMANTIC URL GENERATOR ============
-// Maps topics to relevant seed URLs for crawling
+// ============ IN-MEMORY CACHE (Phase 1) ============
+const queryCache = new Map(); // query -> { results, timestamp, stats }
+const visitedUrlsPerQuery = {}; // Per-query visited set
+
+// ============ SEMANTIC TOPIC SEEDS (Extended) ============
 const TOPIC_SEEDS = {
-  'javascript': [
-    'https://developer.mozilla.org/en-US/docs/Web/JavaScript',
-    'https://en.wikipedia.org/wiki/JavaScript',
-    'https://www.w3schools.com/js/'
-  ],
-  'python': [
-    'https://www.python.org/',
-    'https://en.wikipedia.org/wiki/Python_(programming_language)',
-    'https://docs.python.org/'
-  ],
-  'react': [
-    'https://react.dev/',
-    'https://en.wikipedia.org/wiki/React_(JavaScript_library)',
-    'https://developer.mozilla.org/en-US/docs/Glossary/React'
-  ],
-  'ai': [
-    'https://en.wikipedia.org/wiki/Artificial_intelligence',
-    'https://www.ibm.com/topics/artificial-intelligence',
-    'https://openai.com/'
-  ],
-  'web': [
-    'https://developer.mozilla.org/en-US/docs/Web/',
-    'https://www.w3schools.com/',
-    'https://www.w3.org/'
-  ],
-  'machine learning': [
-    'https://en.wikipedia.org/wiki/Machine_learning',
-    'https://www.tensorflow.org/',
-    'https://scikit-learn.org/'
-  ],
-  'data science': [
-    'https://en.wikipedia.org/wiki/Data_science',
-    'https://pandas.pydata.org/',
-    'https://www.kaggle.com/'
-  ],
-  'node': [
-    'https://nodejs.org/',
-    'https://en.wikipedia.org/wiki/Node.js',
-    'https://www.w3schools.com/nodejs/'
-  ],
-  'api': [
-    'https://en.wikipedia.org/wiki/API',
-    'https://www.postman.com/',
-    'https://swagger.io/'
-  ],
-  'database': [
-    'https://en.wikipedia.org/wiki/Database',
-    'https://www.mongodb.com/',
-    'https://www.postgresql.org/'
-  ],
-  'cloud': [
-    'https://en.wikipedia.org/wiki/Cloud_computing',
-    'https://aws.amazon.com/',
-    'https://cloud.google.com/'
-  ],
-  'devops': [
-    'https://en.wikipedia.org/wiki/DevOps',
-    'https://www.docker.com/',
-    'https://kubernetes.io/'
-  ]
+  'javascript': ['https://developer.mozilla.org/en-US/docs/Web/JavaScript', 'https://javascript.info/', 'https://stackoverflow.com/questions/tagged/javascript', 'https://www.typescriptlang.org/'],
+  'python': ['https://www.python.org/', 'https://docs.python.org/', 'https://realpython.com/', 'https://www.python.org/community/'],
+  'react': ['https://react.dev/', 'https://stackoverflow.com/questions/tagged/reactjs', 'https://github.com/facebook/react', 'https://nextjs.org/'],
+  'nodejs': ['https://nodejs.org/', 'https://nodejs.org/docs/', 'https://stackoverflow.com/questions/tagged/node.js', 'https://expressjs.com/'],
+  'ai': ['https://openai.com/', 'https://en.wikipedia.org/wiki/Artificial_intelligence', 'https://huggingface.co/', 'https://www.anthropic.com/'],
+  'web': ['https://developer.mozilla.org/', 'https://www.w3.org/', 'https://stackoverflow.com/questions/tagged/html', 'https://css-tricks.com/'],
+  'database': ['https://www.postgresql.org/', 'https://www.mongodb.com/', 'https://stackoverflow.com/questions/tagged/sql', 'https://firebase.google.com/'],
+  'api': ['https://developer.mozilla.org/en-US/docs/Web/API', 'https://restfulapi.net/', 'https://swagger.io/', 'https://graphql.org/'],
+  'cloud': ['https://aws.amazon.com/', 'https://cloud.google.com/', 'https://azure.microsoft.com/', 'https://www.digitalocean.com/'],
+  'devops': ['https://www.docker.com/', 'https://kubernetes.io/', 'https://www.jenkins.io/', 'https://www.terraform.io/'],
+  'ml': ['https://www.tensorflow.org/', 'https://pytorch.org/', 'https://scikit-learn.org/', 'https://www.fast.ai/'],
+  'security': ['https://owasp.org/', 'https://cwe.mitre.org/', 'https://cheatsheetseries.owasp.org/', 'https://portswigger.net/'],
+  'news': ['https://news.ycombinator.com/', 'https://techcrunch.com/', 'https://theverge.com/', 'https://arstechnica.com/'],
+  'roblox': ['https://www.roblox.com/', 'https://create.roblox.com/', 'https://developer.roblox.com/', 'https://www.roblox.com/docs/'],
+  'game': ['https://unity.com/', 'https://www.unrealengine.com/', 'https://godotengine.org/', 'https://www.cryengine.com/'],
 };
 
-// ============ DEFAULT FALLBACK SEEDS ============
 const DEFAULT_SEEDS = [
-  'https://en.wikipedia.org/wiki/Technology',
-  'https://developer.mozilla.org/en-US/docs/Web/',
-  'https://www.w3schools.com/',
+  'https://en.wikipedia.org/',
+  'https://developer.mozilla.org/',
   'https://stackoverflow.com/',
-  'https://github.com/'
+  'https://github.com/',
+  'https://medium.com/',
 ];
-
-// ============ SEMANTIC SEED URL GENERATOR ============
-function generateSemanticSeeds(query) {
-  const queryLower = query.toLowerCase();
-  const seedCandidates = new Set();
-
-  // Check if query matches any topic directly
-  for (const [topic, urls] of Object.entries(TOPIC_SEEDS)) {
-    if (queryLower.includes(topic) || topic.includes(queryLower.split(' ')[0])) {
-      urls.forEach(url => seedCandidates.add(url));
-    }
-  }
-
-  // If no semantic matches, use defaults
-  if (seedCandidates.size === 0) {
-    DEFAULT_SEEDS.forEach(url => seedCandidates.add(url));
-  }
-
-  // Mix in a couple of defaults for diversity
-  seedCandidates.add(DEFAULT_SEEDS[0]);
-  seedCandidates.add(DEFAULT_SEEDS[3]);
-
-  return Array.from(seedCandidates).slice(0, 6); // Return max 6 seeds
-}
 
 // ============ STOP WORDS ============
 const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'if', 'in', 'into', 'is', 'it',
   'no', 'not', 'of', 'on', 'or', 'such', 'that', 'the', 'their', 'then', 'there', 'these', 'they',
-  'this', 'to', 'was', 'will', 'with', 'from', 'has', 'have', 'had', 'do', 'does', 'did', 'page'
+  'this', 'to', 'was', 'will', 'with', 'from', 'has', 'have', 'had', 'do', 'does', 'did', 'page',
 ]);
 
-// ============ WEB CRAWLER ============
-async function crawlPage(url, depth = 0) {
-  if (depth > 2 || visitedUrls.size >= MAX_PAGES || visitedUrls.has(url)) {
-    return null;
+// ============ GENERATE SEMANTIC SEEDS ============
+function generateSemanticSeeds(query) {
+  const queryLower = query.toLowerCase();
+  const seeds = new Set();
+  const keywords = queryLower.split(/\s+/).filter(w => w.length > 3);
+
+  // Match query terms to topic seeds
+  for (const [topic, urls] of Object.entries(TOPIC_SEEDS)) {
+    const matches = keywords.filter(kw => topic.includes(kw) || kw.includes(topic[0]));
+    if (matches.length > 0) {
+      urls.forEach(u => seeds.add(u));
+    }
   }
 
-  try {
-    visitedUrls.add(url);
-    console.log(`[CRAWLER] Fetching: ${url}`);
+  // Add defaults for diversity
+  if (seeds.size < 2) DEFAULT_SEEDS.forEach(u => seeds.add(u));
 
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 3000,
-      maxRedirects: 2
-    });
-
-    const $ = cheerio.load(response.data);
-
-    // Extract title
-    const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
-
-    // Extract main content (remove scripts, styles, nav, etc)
-    $('script, style, nav, footer, .nav, .sidebar').remove();
-    const content = $('body').text()
-      .replace(/\s+/g, ' ')
-      .trim()
-      .substring(0, 5000); // Limit to 5000 chars
-
-    if (content.length < 100) {
-      return null; // Skip pages with too little content
-    }
-
-    // Cache the crawled page
-    crawlCache[url] = {
-      title,
-      content,
-      timestamp: Date.now()
-    };
-
-    // Extract and queue new links (only same domain)
-    const links = [];
-    $('a[href]').each((i, elem) => {
-      let href = $(elem).attr('href');
-      if (href && !href.startsWith('#')) {
-        try {
-          href = new URL(href, url).href;
-          const domain = new URL(url).hostname;
-          const linkDomain = new URL(href).hostname;
-          if (domain === linkDomain && links.length < 3) {
-            links.push(href);
-          }
-        } catch (e) {}
-      }
-    });
-
-    // Recursively crawl discovered links (non-blocking)
-    for (const link of links) {
-      if (visitedUrls.size < MAX_PAGES) {
-        crawlPage(link, depth + 1).catch(() => {});
-      }
-    }
-
-    return { title, content, url };
-  } catch (error) {
-    console.error(`[CRAWLER] Error fetching ${url}:`, error.message);
-    return null;
-  }
+  return Array.from(seeds).slice(0, 6);
 }
 
 // ============ TOKENIZER ============
 function tokenize(text) {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter(token => token.length > 2 && !STOP_WORDS.has(token));
+    .filter(t => t.length > 2 && !STOP_WORDS.has(t));
 }
 
-// ============ BUILD INVERTED INDEX FROM CRAWLED DATA ============
-function buildInvertedIndex(documents) {
-  const invertedIndex = {};
-  const docFrequency = {};
+// ============ WEB CRAWLER (Per-Query) ============
+async function crawlPage(url, query, depth = 0, queryId) {
+  if (!queryId) queryId = query;
+  if (!visitedUrlsPerQuery[queryId]) visitedUrlsPerQuery[queryId] = new Set();
 
-  for (const [docId, doc] of Object.entries(documents)) {
-    const tokens = tokenize(doc.title + ' ' + doc.content);
+  const visited = visitedUrlsPerQuery[queryId];
+  if (depth > CRAWL_DEPTH_LIMIT || visited.size >= MAX_PAGES || visited.has(url)) {
+    return null;
+  }
+
+  try {
+    visited.add(url);
+    console.log(`[CRAWL] Depth ${depth}: ${url.substring(0, 60)}`);
+
+    const response = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 3000,
+      maxRedirects: 2,
+    });
+
+    const $ = cheerio.load(response.data);
+    const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
+
+    // Extract main content - smart selector
+    $('script, style, nav, footer, .ad, .sidebar, .nav, noscript').remove();
+    let content = $('main, article, .content, .post, .article-body, body').first().text()
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 5000);
+
+    if (content.length < 100) return null; // Too short
+
+    // Extract relevant links for deeper crawl
+    const links = [];
+    $('a[href]').each((_, el) => {
+      const href = $(el).attr('href');
+      if (href && links.length < 5) {
+        try {
+          const fullUrl = new URL(href, url).href;
+          const sameDomain = new URL(url).hostname === new URL(fullUrl).hostname;
+          if (sameDomain && !fullUrl.includes('#')) links.push(fullUrl);
+        } catch (e) {}
+      }
+    });
+
+    // Recursively crawl discovered links (non-blocking)
+    for (const link of links) {
+      if (visited.size < MAX_PAGES) {
+        crawlPage(link, query, depth + 1, queryId).catch(() => {});
+      }
+    }
+
+    return { url, title, content };
+  } catch (error) {
+    console.error(`[CRAWL-ERROR] ${url.substring(0, 40)}: ${error.message}`);
+    return null;
+  }
+}
+
+// ============ BUILD IN-MEMORY INDEX ============
+function buildIndex(pages) {
+  const index = {};
+  const docFreq = {};
+
+  for (const [i, page] of pages.entries()) {
+    const tokens = tokenize(`${page.title} ${page.title} ${page.content}`); // Title weight x2
     const termFreq = {};
 
     for (const token of tokens) {
@@ -210,90 +153,129 @@ function buildInvertedIndex(documents) {
     }
 
     for (const [token, freq] of Object.entries(termFreq)) {
-      if (!invertedIndex[token]) {
-        invertedIndex[token] = {};
-        docFrequency[token] = 0;
-      }
-      invertedIndex[token][docId] = freq;
-      docFrequency[token]++;
+      if (!index[token]) index[token] = {};
+      index[token][i] = freq;
+      docFreq[token] = (docFreq[token] || 0) + 1;
     }
   }
 
-  return { invertedIndex, docFrequency };
+  return { index, docFreq };
 }
 
-// ============ TF-IDF RANKING ============
-function calculateTFIDF(documents, invertedIndex, docFrequency, query) {
+// ============ TF-IDF + BM25 RANKING ============
+function rankResults(pages, index, docFreq, query) {
   const queryTokens = tokenize(query);
   const scores = {};
-  const totalDocs = Math.max(Object.keys(documents).length, 1);
+  const totalDocs = Math.max(pages.length, 1);
+  const avgDocLength = pages.reduce((sum, p) => sum + p.content.length, 0) / totalDocs;
 
   for (const token of queryTokens) {
-    if (!invertedIndex[token]) continue;
+    if (!index[token]) continue;
 
-    const idf = Math.log(totalDocs / (docFrequency[token] || 1));
+    // IDF calculation
+    const idf = Math.log(totalDocs / (docFreq[token] || 1));
 
-    for (const [docId, termFreq] of Object.entries(invertedIndex[token])) {
-      const docLength = Object.values(invertedIndex)
-        .reduce((sum, docTerms) => sum + (docTerms[docId] ? 1 : 0), 0);
-      const tf = termFreq / Math.max(docLength, 1);
-      const tfidf = tf * idf;
+    // BM25 parameters
+    const K1 = 1.5; // term frequency saturation
+    const B = 0.75; // length normalization
 
-      scores[docId] = (scores[docId] || 0) + tfidf;
+    for (const [docId, tf] of Object.entries(index[token])) {
+      const docLength = pages[docId].content.length;
+      const normLength = docLength / avgDocLength;
+
+      // BM25 formula
+      const numerator = tf * (K1 + 1);
+      const denominator = tf + K1 * (1 - B + B * normLength);
+      const bm25 = idf * (numerator / denominator);
+
+      scores[docId] = (scores[docId] || 0) + bm25;
     }
   }
 
   return scores;
 }
 
-// ============ SEARCH WITH SEMANTIC CRAWLING ============
+// ============ SEARCH WITH CACHING (Phase 1) ============
 async function search(query, limit = 15) {
-  const startTime = Date.now();
+  const cacheKey = query.toLowerCase().trim();
+  const now = Date.now();
 
-  // Generate semantic seeds based on query
-  const semanticSeeds = generateSemanticSeeds(query);
-  console.log(`[SEARCH] Query: "${query}" -> Generated seeds:`, semanticSeeds);
+  // Check query cache first
+  if (queryCache.has(cacheKey)) {
+    const cached = queryCache.get(cacheKey);
+    if (now - cached.timestamp < QUERY_CACHE_TTL) {
+      console.log(`[CACHE-HIT] "${query}" - returned ${cached.results.length} cached results`);
+      return cached.results.slice(0, limit);
+    }
+  }
 
-  // Reset visited URLs for fresh crawl per query
-  visitedUrls.clear();
+  console.log(`[FRESH-CRAWL] Starting per-query semantic crawl for "${query}"`);
+  const startTime = now;
+  const seeds = generateSemanticSeeds(query);
+  const queryId = `q_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  visitedUrlsPerQuery[queryId] = new Set();
 
-  // Trigger crawler for semantic seeds (non-blocking)
-  semanticSeeds.slice(0, 4).forEach(url => {
-    crawlPage(url).catch(() => {});
-  });
+  // Launch parallel crawls from all seeds
+  const crawlPromises = seeds.slice(0, 4).map(url => crawlPage(url, query, 0, queryId));
 
-  // Wait for initial crawl results
-  await new Promise(r => setTimeout(r, 2000));
+  // Wait for crawls with timeout
+  await Promise.race([
+    Promise.all(crawlPromises),
+    new Promise(r => setTimeout(r, MAX_CRAWL_TIME))
+  ]).catch(() => {});
 
-  // Build index from crawled pages
-  const { invertedIndex, docFrequency } = buildInvertedIndex(crawlCache);
-  const scores = calculateTFIDF(crawlCache, invertedIndex, docFrequency, query);
+  // Collect all crawled pages into array
+  const crawledData = Object.values(visitedUrlsPerQuery[queryId] || {}).filter(Boolean);
+  const pages = crawledData.slice(0, MAX_PAGES);
 
-  // Rank and return results
-  const results = Object.entries(scores)
+  console.log(`[CRAWL-COMPLETE] Crawled ${pages.length} pages in ${Date.now() - startTime}ms`);
+
+  // Fallback if no pages crawled
+  if (pages.length === 0) {
+    console.log('[FALLBACK] No pages crawled, using seed URLs');
+    return seeds.slice(0, limit).map(url => ({
+      title: `Resource: ${new URL(url).hostname}`,
+      url,
+      snippet: 'Related resource for your query',
+      content: '',
+    }));
+  }
+
+  // Build index and rank
+  const { index, docFreq } = buildIndex(pages);
+  const scores = rankResults(pages, index, docFreq, query);
+
+  // Format and return results
+  let results = Object.entries(scores)
     .map(([docId, score]) => ({
-      title: crawlCache[docId].title,
-      url: docId,
-      snippet: crawlCache[docId].content.substring(0, 150) + '...',
-      score
+      title: pages[docId].title,
+      url: pages[docId].url,
+      snippet: pages[docId].content.substring(0, 220) + '...',
+      score,
     }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(r => ({ title: r.title, url: r.url, snippet: r.snippet }));
 
-  // If no results, add semantic seeds as fallback
-  if (results.length === 0) {
-    semanticSeeds.slice(0, 3).forEach(url => {
-      results.push({
-        title: 'See: ' + url,
-        url,
-        snippet: 'Related resource for your query'
-      });
-    });
+  // Cache the results
+  const cacheEntry = { 
+    results, 
+    timestamp: startTime,
+    stats: { pagesIndexed: pages.length, elapsed: Date.now() - startTime }
+  };
+  queryCache.set(cacheKey, cacheEntry);
+
+  // Cleanup old cache (keep last 50 queries)
+  if (queryCache.size > 50) {
+    const firstKey = queryCache.keys().next().value;
+    queryCache.delete(firstKey);
   }
 
   const elapsed = Date.now() - startTime;
-  console.log(`[SEARCH] Query "${query}" completed in ${elapsed}ms with ${results.length} results from ${Object.keys(crawlCache).length} pages`);
+  console.log(`[SEARCH-SUCCESS] "${query}" - ${results.length} results in ${elapsed}ms from ${pages.length} pages`);
+
+  // Cleanup per-query state
+  delete visitedUrlsPerQuery[queryId];
 
   return results;
 }
@@ -302,39 +284,11 @@ async function search(query, limit = 15) {
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=300');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const { query, limit = 15 } = req.query;
-
-  if (!query) {
-    return res.status(400).json({
-      success: false,
-      error: 'Query parameter required',
-      results: []
-    });
-  }
-
-  try {
-    const results = await search(query, parseInt(limit) || 15);
-
-    return res.status(200).json({
-      success: true,
-      query,
-      results,
-      count: results.length,
-      crawledPages: Object.keys(crawlCache).length,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('Search error:', error.message);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Internal server error',
-      results: []
-    });
-  }
-};
+  const query = req.query.query || req.body?.query;
+  const limit = parseInt(req.query.limit || req.body?.limit ||
